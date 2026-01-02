@@ -100,6 +100,7 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
     <meta charset="UTF-8">
     <title>LOGSTELLAR // TERMINAL</title>
     <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=JetBrains+Mono&display=swap" rel="stylesheet">
     <style>
@@ -218,8 +219,17 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
         }
 
         .main-view {
-            display: flex;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
             flex: 1;
+            overflow: hidden;
+            gap: 0;
+        }
+
+        .alerts-panel {
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
             overflow: hidden;
         }
 
@@ -228,6 +238,47 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
             overflow-y: auto;
             display: flex;
             flex-direction: column;
+        }
+
+        .analytics-panel {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            background: var(--surface);
+        }
+
+        .chart-container {
+            padding: 20px;
+            border-bottom: 1px solid var(--border);
+            position: relative;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .chart-wrapper {
+            flex: 1;
+            position: relative;
+            min-height: 0;
+        }
+
+        .chart-container:last-child {
+            border-bottom: none;
+        }
+
+        .chart-header {
+            font-family: 'JetBrains Mono';
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: var(--text-dim);
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        canvas {
+            max-height: 100%;
         }
 
         .search-bar {
@@ -383,11 +434,34 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
     </div>
 
     <main class="main-view">
-        <div class="alerts-list">
-            <div class="search-bar">
-                <input type="text" class="search-input" id="search-input" placeholder="SEARCH_PATTERNS // Type pattern name or category..." oninput="filterAlerts()">
+        <div class="alerts-panel">
+            <div class="alerts-list">
+                <div class="search-bar">
+                    <input type="text" class="search-input" id="search-input" placeholder="SEARCH_PATTERNS // Type pattern name or category..." oninput="filterAlerts()">
+                </div>
+                <div class="alerts-content" id="alerts-container"></div>
             </div>
-            <div class="alerts-content" id="alerts-container"></div>
+        </div>
+
+        <div class="analytics-panel">
+            <div class="chart-container" style="height: 55%;">
+                <div class="chart-header">
+                    <i data-lucide="activity" class="icon-xs"></i>
+                    PATTERN_DETECTION_TIMELINE
+                </div>
+                <div class="chart-wrapper">
+                    <canvas id="lineChart"></canvas>
+                </div>
+            </div>
+            <div class="chart-container" style="height: 45%;">
+                <div class="chart-header">
+                    <i data-lucide="pie-chart" class="icon-xs"></i>
+                    CATEGORY_DISTRIBUTION
+                </div>
+                <div class="chart-wrapper">
+                    <canvas id="pieChart"></canvas>
+                </div>
+            </div>
         </div>
     </main>
 
@@ -406,6 +480,198 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
         var currentAlerts = [];
         var allAlerts = [];
         var currentRPC = 'devnet';
+        var lineChart = null;
+        var pieChart = null;
+        var timelineData = {
+            labels: [],
+            datasets: {}
+        };
+        var categoryData = {};
+        var maxDataPoints = 20;
+
+        function initCharts() {
+            var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+            var gridColor = isDark ? '#262626' : '#e5e5e5';
+            var textColor = isDark ? '#737373' : '#737373';
+            var accentColor = isDark ? '#00ff41' : '#2563eb';
+
+            // Line Chart
+            var lineCtx = document.getElementById('lineChart').getContext('2d');
+            lineChart = new Chart(lineCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: []
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'top',
+                            labels: {
+                                color: textColor,
+                                font: {
+                                    family: 'JetBrains Mono',
+                                    size: 10
+                                },
+                                boxWidth: 12,
+                                boxHeight: 12
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            grid: { color: gridColor },
+                            ticks: {
+                                color: textColor,
+                                font: { family: 'JetBrains Mono', size: 9 }
+                            }
+                        },
+                        y: {
+                            grid: { color: gridColor },
+                            ticks: {
+                                color: textColor,
+                                font: { family: 'JetBrains Mono', size: 9 }
+                            },
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+
+            // Pie Chart
+            var pieCtx = document.getElementById('pieChart').getContext('2d');
+            pieChart = new Chart(pieCtx, {
+                type: 'doughnut',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        data: [],
+                        backgroundColor: [
+                            accentColor,
+                            '#f59e0b',
+                            '#8b5cf6',
+                            '#ec4899',
+                            '#06b6d4',
+                            '#10b981',
+                            '#ef4444',
+                            '#6366f1'
+                        ],
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'right',
+                            labels: {
+                                color: textColor,
+                                font: {
+                                    family: 'JetBrains Mono',
+                                    size: 10
+                                },
+                                boxWidth: 12,
+                                boxHeight: 12
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateCharts() {
+            if (!lineChart || !pieChart) return;
+
+            // Get current time label
+            var now = new Date();
+            var timeLabel = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0') + ':' + String(now.getSeconds()).padStart(2, '0');
+
+            // Count patterns in recent alerts (last 100)
+            var recentAlerts = allAlerts.slice(0, 100);
+            var patternCounts = {};
+            var categoryCounts = {};
+
+            recentAlerts.forEach(function(alert) {
+                var pattern = alert.Result.PatternName;
+                patternCounts[pattern] = (patternCounts[pattern] || 0) + 1;
+
+                // Determine category
+                var category = 'Other';
+                if (pattern.includes('Token') || pattern.includes('Pump.fun')) category = 'Token';
+                else if (pattern.includes('MEV') || pattern.includes('Whale')) category = 'MEV';
+                else if (pattern.includes('Raydium') || pattern.includes('Orca') || pattern.includes('Jupiter') || pattern.includes('Flash')) category = 'DeFi';
+                else if (pattern.includes('NFT') || pattern.includes('Magic Eden')) category = 'NFT';
+                else if (pattern.includes('Failed')) category = 'Error';
+
+                categoryCounts[category] = (categoryCounts[category] || 0) + 1;
+            });
+
+            // Update line chart
+            if (timelineData.labels.length >= maxDataPoints) {
+                timelineData.labels.shift();
+                Object.keys(timelineData.datasets).forEach(function(key) {
+                    timelineData.datasets[key].shift();
+                });
+            }
+
+            timelineData.labels.push(timeLabel);
+            Object.keys(patternCounts).forEach(function(pattern) {
+                if (!timelineData.datasets[pattern]) {
+                    timelineData.datasets[pattern] = [];
+                }
+            });
+
+            // Add current counts
+            var topPatterns = Object.keys(patternCounts).slice(0, 5); // Top 5 patterns
+            topPatterns.forEach(function(pattern) {
+                if (!timelineData.datasets[pattern]) {
+                    timelineData.datasets[pattern] = new Array(timelineData.labels.length - 1).fill(0);
+                }
+                timelineData.datasets[pattern].push(patternCounts[pattern]);
+            });
+
+            // Pad datasets with zeros
+            Object.keys(timelineData.datasets).forEach(function(pattern) {
+                while (timelineData.datasets[pattern].length < timelineData.labels.length) {
+                    timelineData.datasets[pattern].unshift(0);
+                }
+            });
+
+            // Convert to Chart.js format
+            var datasets = [];
+            var colors = ['#00ff41', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4'];
+            var idx = 0;
+            Object.keys(timelineData.datasets).forEach(function(pattern) {
+                datasets.push({
+                    label: pattern,
+                    data: timelineData.datasets[pattern],
+                    borderColor: colors[idx % colors.length],
+                    backgroundColor: 'transparent',
+                    borderWidth: 2,
+                    tension: 0.3,
+                    pointRadius: 2
+                });
+                idx++;
+            });
+
+            lineChart.data.labels = timelineData.labels;
+            lineChart.data.datasets = datasets;
+            lineChart.update('none');
+
+            // Update pie chart
+            pieChart.data.labels = Object.keys(categoryCounts);
+            pieChart.data.datasets[0].data = Object.values(categoryCounts);
+            pieChart.update('none');
+        }
 
         function toggleTheme() {
             var root = document.documentElement;
@@ -446,6 +712,7 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
                 .then(function(alerts) {
                     allAlerts = alerts || [];
                     renderAlerts(allAlerts);
+                    updateCharts();
                 });
 
             fetch('/api/rpc-mode')
@@ -521,6 +788,7 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
         updateDashboard();
         setInterval(updateDashboard, 2000);
         window.onload = function() {
+            initCharts();
             if (window.lucide) {
                 window.lucide.createIcons();
             }
