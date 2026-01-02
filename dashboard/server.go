@@ -279,17 +279,15 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
                     container.innerHTML = alerts.map(alert => {
                         const time = new Date(alert.Timestamp).toLocaleTimeString();
                         const confidence = (alert.Result.Confidence * 100).toFixed(1);
-                        return \`
-                            <div class="alert-item">
-                                <div class="alert-header">
-                                    <span class="pattern-name">\${alert.Result.PatternName}</span>
-                                    <span class="timestamp">\${time}</span>
-                                </div>
-                                <div>
-                                    <span class="confidence">\${confidence}% Match</span>
-                                </div>
-                            </div>
-                        \`;
+                        return '<div class="alert-item">' +
+                            '<div class="alert-header">' +
+                            '<span class="pattern-name">' + alert.Result.PatternName + '</span>' +
+                            '<span class="timestamp">' + time + '</span>' +
+                            '</div>' +
+                            '<div>' +
+                            '<span class="confidence">' + confidence + '% Match</span>' +
+                            '</div>' +
+                            '</div>';
                     }).join('');
                 });
         }

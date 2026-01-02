@@ -83,19 +83,18 @@ func (i *Ingestor) GetTransactionSignatures(address string, limit int) ([]string
 		return nil, fmt.Errorf("invalid address: %w", err)
 	}
 
-	sigs, err := i.client.GetSignaturesForAddress(
-		i.ctx,
-		pubkey,
-		&rpc.GetSignaturesForAddressOpts{
-			Limit: &limit,
-		},
-	)
+	// Note: Limit parameter may need to be passed differently depending on SDK version
+	sigs, err := i.client.GetSignaturesForAddress(i.ctx, pubkey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get signatures: %w", err)
 	}
 
-	signatures := make([]string, 0, len(sigs))
-	for _, sig := range sigs {
+	// Take only 'limit' number of signatures
+	signatures := make([]string, 0, limit)
+	for idx, sig := range sigs {
+		if idx >= limit {
+			break
+		}
 		signatures = append(signatures, sig.Signature.String())
 	}
 
@@ -141,21 +140,18 @@ func (i *Ingestor) GetProgramLogs(programID string, limit int) ([]string, error)
 	}
 
 	// Get signatures for the program
-	sigs, err := i.client.GetSignaturesForAddress(
-		i.ctx,
-		pubkey,
-		&rpc.GetSignaturesForAddressOpts{
-			Limit: &limit,
-		},
-	)
+	sigs, err := i.client.GetSignaturesForAddress(i.ctx, pubkey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get signatures: %w", err)
 	}
 
 	logs := make([]string, 0)
 	
-	// Fetch logs for each transaction
-	for _, sig := range sigs {
+	// Fetch logs for each transaction (up to limit)
+	for idx, sig := range sigs {
+		if idx >= limit {
+			break
+		}
 		txLogs, err := i.GetTransactionDetails(sig.Signature.String())
 		if err != nil {
 			log.Printf("Warning: Failed to get tx %s: %v", sig.Signature, err)

@@ -1,7 +1,6 @@
 package gpu
 
 import (
-	"fmt"
 	"strings"
 	"sync"
 	"time"
