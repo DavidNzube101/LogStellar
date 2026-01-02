@@ -39,22 +39,35 @@ func (i *Ingestor) FetchRecentLogs(limit int) ([]string, error) {
 	}
 
 	if i.lastSlot == 0 {
-		i.lastSlot = slot - 10 // Start from 10 slots back
+		i.lastSlot = slot - 2 // Start from just 2 slots back (faster)
+		log.Printf("🎯 Starting from slot %d (current: %d)", i.lastSlot, slot)
 	}
 
 	logs := make([]string, 0, limit)
+	blocksChecked := 0
+	txCount := 0
 	
-	// Fetch blocks from lastSlot to current
+	// Fetch blocks from lastSlot to current with transaction version support
 	for s := i.lastSlot; s <= slot && len(logs) < limit; s++ {
-		block, err := i.client.GetBlock(i.ctx, s)
+		blocksChecked++
+		block, err := i.client.GetBlockWithOpts(
+			i.ctx,
+			s,
+			&rpc.GetBlockOpts{
+				Commitment:                     rpc.CommitmentFinalized,
+				MaxSupportedTransactionVersion: func() *uint64 { v := uint64(0); return &v }(),
+			},
+		)
 		if err != nil {
-			log.Printf("Warning: Failed to get block %d: %v", s, err)
+			// Don't spam logs for missing blocks
 			continue
 		}
 
 		if block == nil || block.Transactions == nil {
 			continue
 		}
+
+		txCount += len(block.Transactions)
 
 		// Extract logs from transactions
 		for _, tx := range block.Transactions {
@@ -72,6 +85,12 @@ func (i *Ingestor) FetchRecentLogs(limit int) ([]string, error) {
 		}
 	}
 
+	if blocksChecked > 0 {
+		log.Printf("📊 Checked %d blocks, %d transactions, found %d logs", blocksChecked, txCount, len(logs))
+	} else {
+		log.Printf("⚠️  No blocks checked (slot range: %d to %d)", i.lastSlot, slot)
+	}
+	
 	i.lastSlot = slot + 1
 	return logs, nil
 }

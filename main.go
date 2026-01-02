@@ -21,7 +21,7 @@ const (
 	DEVNET_RPC  = "https://api.devnet.solana.com"
 	
 	// Batch size for GPU processing
-	BATCH_SIZE = 10000
+	BATCH_SIZE = 1000 // Reduced for faster testing
 )
 
 func main() {
@@ -47,7 +47,7 @@ func main() {
 
 	// 3. Initialize Solana Ingestor
 	fmt.Println("[3/4] Connecting to Solana RPC...")
-	rpcEndpoint := DEVNET_RPC // Use devnet for testing
+	rpcEndpoint := MAINNET_RPC // Start with mainnet for real data
 	if endpoint := os.Getenv("SOLANA_RPC"); endpoint != "" {
 		rpcEndpoint = endpoint
 	}
@@ -68,7 +68,7 @@ func main() {
 	fmt.Println("🔍 Scanning Solana logs for patterns...")
 	fmt.Println("\nPress Ctrl+C to stop\n")
 
-	// Main processing loop
+	// Main processing loop - pass dashboard server for RPC switching
 	go processLogs(ctx, ing, scanner, detector, dashServer)
 
 	// Wait for interrupt signal
@@ -86,25 +86,44 @@ func processLogs(ctx context.Context, ing *ingestor.Ingestor, scanner *gpu.Scann
 	detector *patterns.Detector, dash *dashboard.Server) {
 	
 	logBatch := make([]string, 0, BATCH_SIZE)
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(3 * time.Second) // Faster polling
 	defer ticker.Stop()
+
+	log.Println("🔄 Starting log ingestion loop...")
+	
+	// Track RPC mode changes
+	lastRPCMode := dash.GetRPCMode()
+	log.Printf("📡 Initial RPC mode: %s", lastRPCMode)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// Check if RPC mode changed
+			currentRPCMode := dash.GetRPCMode()
+			if currentRPCMode != lastRPCMode {
+				log.Printf("⚡ RPC mode changed: %s -> %s (Note: Restart required for full effect)", lastRPCMode, currentRPCMode)
+				lastRPCMode = currentRPCMode
+			}
+
 			// Fetch recent transactions
-			logs, err := ing.FetchRecentLogs(100)
+			logs, err := ing.FetchRecentLogs(500) // Increased from 100 to 500
 			if err != nil {
-				log.Printf("Error fetching logs: %v", err)
+				log.Printf("❌ Error fetching logs: %v", err)
 				continue
 			}
 
+			if len(logs) == 0 {
+				log.Println("⏳ No logs found in this batch, waiting for next interval...")
+				continue
+			}
+
+			log.Printf("📥 Fetched %d logs from Solana", len(logs))
 			logBatch = append(logBatch, logs...)
 
-			// Process when batch is full
-			if len(logBatch) >= BATCH_SIZE {
+			// Process when batch has enough logs OR every 5 batches
+			if len(logBatch) >= 100 { // Lower threshold for testing
 				processBatch(logBatch, scanner, detector, dash)
 				logBatch = logBatch[:0] // Clear batch
 			}
