@@ -2,7 +2,10 @@ module logstellar
 
 go 1.25.4
 
-require github.com/gagliardetto/solana-go v1.14.0
+require (
+	github.com/gagliardetto/solana-go v1.14.0
+	github.com/rajveermalviya/go-webgpu/wgpu v0.17.1
+)
 
 require (
 	filippo.io/edwards25519 v1.0.0-rc.1 // indirect
