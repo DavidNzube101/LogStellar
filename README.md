@@ -2,6 +2,8 @@
 
 **The Mission:** A Go-based real-time Solana transaction log analyzer using GPU parallelization to scan millions of logs for specific "Signature Patterns" (detecting new liquidity pools, MEV behavior, token launches, and more).
 
+![LogStellar Dashboard](public/images/dashboard.png)
+
 Built for the **AIDP GPU Compute Bounty** 
 
 ---
