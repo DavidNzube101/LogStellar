@@ -23,11 +23,14 @@ type Ingestor struct {
 }
 
 type IngestedLog struct {
-	Slot       uint64
-	Signature  string
-	LogMessage string
-	ProgramID  string
-	Timestamp  time.Time
+	Slot         uint64
+	Signature    string
+	LogMessage   string
+	ProgramID    string
+	Timestamp    time.Time
+	Signer       string
+	ComputeUnits uint32
+	IsError      bool
 }
 
 var programInvokeRegex = regexp.MustCompile(`^Program (\w+) invoke`)
@@ -47,7 +50,80 @@ func NewIngestor(rpcEndpoint string) (*Ingestor, error) {
 	}, nil
 }
 
+func (i *Ingestor) Connect() error {
+	var err error
+	// Create WebSocket client
+	i.wsClient, err = ws.Connect(context.Background(), i.wsEndpoint)
+	if err != nil {
+		return fmt.Errorf("WS CONNECT ERROR: %w", err)
+	}
+	return nil
+}
+
+func (i *Ingestor) HasWS() bool {
+	return i.wsClient != nil
+}
+
 func (i *Ingestor) Close() {
+	if i.wsClient != nil {
+		i.wsClient.Close()
+	}
+}
+
+func (i *Ingestor) StreamLogs(ctx context.Context, outCh chan<- []IngestedLog) error {
+	sub, err := i.wsClient.LogsSubscribe(
+		ws.LogsSubscribeFilterAll,
+		rpc.CommitmentProcessed,
+	)
+	if err != nil {
+		return fmt.Errorf("WS SUBSCRIBE ERROR: %w", err)
+	}
+
+	go func() {
+		defer sub.Unsubscribe()
+		
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case result, ok := <-sub.Response():
+				if !ok {
+					return
+				}
+				if result.Value.Err != nil {
+					// Optionally skip failed txs or keep them
+				}
+
+				logs := make([]IngestedLog, 0, len(result.Value.Logs))
+				sig := result.Value.Signature.String()
+				ts := time.Now()
+
+				activeProgram := "system"
+				for _, logMsg := range result.Value.Logs {
+					if match := programInvokeRegex.FindStringSubmatch(logMsg); len(match) > 1 {
+						activeProgram = match[1]
+					}
+					
+					logs = append(logs, IngestedLog{
+						Slot:         result.Context.Slot,
+						Signature:    sig,
+						LogMessage:   logMsg,
+						ProgramID:    activeProgram,
+						Timestamp:    ts,
+						Signer:       "unknown", // WS doesn't provide this easily
+						ComputeUnits: 0,
+						IsError:      result.Value.Err != nil,
+					})
+				}
+				
+				if len(logs) > 0 {
+					outCh <- logs
+				}
+			}
+		}
+	}()
+
+	return nil
 }
 
 func (i *Ingestor) Start(ctx context.Context, startSlot uint64, workers int) <-chan []IngestedLog {
@@ -151,10 +227,20 @@ func (i *Ingestor) FetchSlotLogs(ctx context.Context, slot uint64) ([]IngestedLo
 		}
 
 		signature := ""
+		signer := ""
 		parsedTx, err := tx.GetTransaction()
 		if err == nil && len(parsedTx.Signatures) > 0 {
 			signature = parsedTx.Signatures[0].String()
+			// The first signature is always the fee payer / signer
+			signer = signature 
 		}
+
+		cu := uint32(0)
+		if tx.Meta.ComputeUnitsConsumed != nil {
+			cu = uint32(*tx.Meta.ComputeUnitsConsumed)
+		}
+		
+		isError := tx.Meta.Err != nil
 
 		activeProgram := "system" 
 
@@ -164,11 +250,14 @@ func (i *Ingestor) FetchSlotLogs(ctx context.Context, slot uint64) ([]IngestedLo
 			}
 
 			logs = append(logs, IngestedLog{
-				Slot:       slot,
-				Signature:  signature,
-				LogMessage: logMsg,
-				ProgramID:  activeProgram,
-				Timestamp:  blockTime,
+				Slot:         slot,
+				Signature:    signature,
+				LogMessage:   logMsg,
+				ProgramID:    activeProgram,
+				Timestamp:    blockTime,
+				Signer:       signer,
+				ComputeUnits: cu,
+				IsError:      isError,
 			})
 		}
 	}
