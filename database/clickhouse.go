@@ -37,7 +37,7 @@ func NewClient(addr string) (*Client, error) {
 	}
 
 	if err := conn.Ping(context.Background()); err != nil {
-		return nil, fmt.Errorf("failed to ping clickhouse: %w", err)
+		return nil, fmt.Errorf("FAILED TO PING CLICKHOUSE: %w", err)
 	}
 
 	client := &Client{conn: conn}
@@ -55,18 +55,54 @@ func (c *Client) Close() {
 func (c *Client) initSchema() error {
 	ctx := context.Background()
 
+	// Partitioning by month for performance
 	err := c.conn.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS solana_logs (
+		CREATE TABLE IF NOT EXISTS solana_logs_v2 (
 			timestamp DateTime64(3),
 			slot UInt64,
 			signature String,
 			log_message String,
-			program_id String
+			program_id String,
+			signer String,
+			compute_units UInt32,
+			is_error Bool
 		) ENGINE = MergeTree()
-		ORDER BY (timestamp, slot)
+		PARTITION BY toYYYYMM(timestamp)
+		ORDER BY (timestamp, slot, program_id)
 	`)
 	if err != nil {
-		return fmt.Errorf("failed to create logs table: %w", err)
+		return fmt.Errorf("FAILED TO CREATE LOGS TABLE: %w", err)
+	}
+
+	// Materialized View for fast analytics (Program Heatmap)
+	err = c.conn.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS program_stats (
+			timestamp DateTime,
+			program_id String,
+			total_calls UInt64,
+			total_cu UInt64,
+			error_count UInt64
+		) ENGINE = SummingMergeTree()
+		PARTITION BY toYYYYMM(timestamp)
+		ORDER BY (timestamp, program_id)
+	`)
+	if err != nil {
+		return fmt.Errorf("FAILED TO CREATE STATS TABLE: %w", err)
+	}
+
+	err = c.conn.Exec(ctx, `
+		CREATE MATERIALIZED VIEW IF NOT EXISTS program_stats_mv TO program_stats AS
+		SELECT
+			toStartOfMinute(timestamp) as timestamp,
+			program_id,
+			count() as total_calls,
+			sum(compute_units) as total_cu,
+			sum(if(is_error, 1, 0)) as error_count
+		FROM solana_logs_v2
+		GROUP BY timestamp, program_id
+	`)
+	if err != nil {
+		return fmt.Errorf("FAILED TO CREATE STATS VIEW: %w", err)
 	}
 
 	err = c.conn.Exec(ctx, `
@@ -77,10 +113,24 @@ func (c *Client) initSchema() error {
 			signature String,
 			raw_match String
 		) ENGINE = MergeTree()
+		PARTITION BY toYYYYMM(timestamp)
 		ORDER BY (timestamp, pattern_name)
 	`)
 	if err != nil {
-		return fmt.Errorf("failed to create alerts table: %w", err)
+		return fmt.Errorf("FAILED TO CREATE ALERTS TABLE: %w", err)
+	}
+
+	// State tracking for the indexer
+	err = c.conn.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS indexer_state (
+			id String,
+			last_slot UInt64,
+			updated_at DateTime64(3)
+		) ENGINE = ReplacingMergeTree(updated_at)
+		ORDER BY id
+	`)
+	if err != nil {
+		return fmt.Errorf("FAILED TO CREATE INDEXER STATE TABLE: %w", err)
 	}
 
 	return nil
@@ -88,7 +138,7 @@ func (c *Client) initSchema() error {
 
 func (c *Client) BatchInsertLogs(logs []LogEntry) error {
 	ctx := context.Background()
-	batch, err := c.conn.PrepareBatch(ctx, "INSERT INTO solana_logs (timestamp, slot, signature, log_message, program_id)")
+	batch, err := c.conn.PrepareBatch(ctx, "INSERT INTO solana_logs_v2 (timestamp, slot, signature, log_message, program_id, signer, compute_units, is_error)")
 	if err != nil {
 		return err
 	}
@@ -100,6 +150,9 @@ func (c *Client) BatchInsertLogs(logs []LogEntry) error {
 			l.Signature,
 			l.LogMessage,
 			l.ProgramID,
+			l.Signer,
+			l.ComputeUnits,
+			l.IsError,
 		)
 		if err != nil {
 			return err
@@ -107,25 +160,6 @@ func (c *Client) BatchInsertLogs(logs []LogEntry) error {
 	}
 
 	return batch.Send()
-}
-
-func (c *Client) GetRecentLogs(limit int) ([]LogEntry, error) {
-	ctx := context.Background()
-	rows, err := c.conn.Query(ctx, "SELECT timestamp, slot, signature, log_message, program_id FROM solana_logs ORDER BY timestamp DESC LIMIT ?", limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var logs []LogEntry
-	for rows.Next() {
-		var l LogEntry
-		if err := rows.Scan(&l.Timestamp, &l.Slot, &l.Signature, &l.LogMessage, &l.ProgramID); err != nil {
-			return nil, err
-		}
-		logs = append(logs, l)
-	}
-	return logs, nil
 }
 
 func (c *Client) BatchInsertAlerts(alerts []AlertEntry) error {
@@ -151,12 +185,50 @@ func (c *Client) BatchInsertAlerts(alerts []AlertEntry) error {
 	return batch.Send()
 }
 
+func (c *Client) GetLastIndexedSlot() (uint64, error) {
+	ctx := context.Background()
+	var slot uint64
+	err := c.conn.QueryRow(ctx, "SELECT last_slot FROM indexer_state WHERE id = 'main' FINAL").Scan(&slot)
+	if err != nil {
+		// If table is empty, return 0
+		return 0, nil
+	}
+	return slot, nil
+}
+
+func (c *Client) UpdateLastIndexedSlot(slot uint64) error {
+	ctx := context.Background()
+	return c.conn.Exec(ctx, "INSERT INTO indexer_state (id, last_slot, updated_at) VALUES ('main', ?, ?)", slot, time.Now())
+}
+
+func (c *Client) GetRecentLogs(limit int) ([]LogEntry, error) {
+	ctx := context.Background()
+	rows, err := c.conn.Query(ctx, "SELECT timestamp, slot, signature, log_message, program_id, signer, compute_units, is_error FROM solana_logs_v2 ORDER BY timestamp DESC LIMIT ?", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var logs []LogEntry
+	for rows.Next() {
+		var l LogEntry
+		if err := rows.Scan(&l.Timestamp, &l.Slot, &l.Signature, &l.LogMessage, &l.ProgramID, &l.Signer, &l.ComputeUnits, &l.IsError); err != nil {
+			return nil, err
+		}
+		logs = append(logs, l)
+	}
+	return logs, nil
+}
+
 type LogEntry struct {
-	Timestamp  time.Time
-	Slot       uint64
-	Signature  string
-	LogMessage string
-	ProgramID  string
+	Timestamp    time.Time
+	Slot         uint64
+	Signature    string
+	LogMessage   string
+	ProgramID    string
+	Signer       string
+	ComputeUnits uint32
+	IsError      bool
 }
 
 type AlertEntry struct {

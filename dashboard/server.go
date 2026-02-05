@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"logstellar/database"
 	"logstellar/gpu"
 )
 
@@ -19,6 +20,8 @@ type Server struct {
 	mu      sync.RWMutex
 	rpcMode string // "devnet" or "mainnet"
 	rpcMu   sync.RWMutex
+	db      *database.Client
+	scanner *gpu.Scanner
 }
 
 type Alert struct {
@@ -35,19 +38,23 @@ type Stats struct {
 	LastUpdate     time.Time
 }
 
-func NewServer(port int) *Server {
+func NewServer(port int, db *database.Client, scanner *gpu.Scanner) *Server {
 	return &Server{
 		port:    port,
 		alerts:  make([]Alert, 0),
 		stats:   Stats{},
 		rpcMode: "devnet", // Default
+		db:      db,
+		scanner: scanner,
 	}
 }
 
 func (s *Server) Start() {
 	http.HandleFunc("/", s.handleHome)
 	http.HandleFunc("/api/alerts", s.handleAlerts)
+	http.HandleFunc("/api/logs", s.handleLogs)
 	http.HandleFunc("/api/stats", s.handleStats)
+	http.HandleFunc("/api/gpu-stats", s.handleGPUStats)
 	http.HandleFunc("/api/rpc-mode", s.handleRPCMode)
 	http.HandleFunc("/api/switch-rpc", s.handleSwitchRPC)
 
@@ -57,6 +64,29 @@ func (s *Server) Start() {
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatalf("Failed to start dashboard: %v", err)
 	}
+}
+
+func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
+	if s.db == nil {
+		json.NewEncoder(w).Encode([]database.LogEntry{})
+		return
+	}
+	logs, err := s.db.GetRecentLogs(50)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(logs)
+}
+
+func (s *Server) handleGPUStats(w http.ResponseWriter, r *http.Request) {
+	if s.scanner == nil {
+		json.NewEncoder(w).Encode(map[string]string{"status": "offline"})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.scanner.GPUStats())
 }
 
 func (s *Server) AddAlert(message string, result gpu.ScanResult) {

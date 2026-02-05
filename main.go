@@ -17,130 +17,102 @@ import (
 )
 
 const (
-	// Solana RPC endpoints
 	MAINNET_RPC = "https://api.mainnet-beta.solana.com"
 	DEVNET_RPC  = "https://api.devnet.solana.com"
-	
-	// Batch size for GPU processing
-	BATCH_SIZE = 1000 // Reduced for faster testing
+	BATCH_SIZE = 1000
 )
 
 func main() {
-	fmt.Println("🌟 LogStellar - GPU-Accelerated Solana Log Analyzer")
+	fmt.Println("LOGSTELLAR - GPU-ACCELERATED SOLANA LOG ANALYZER")
 	fmt.Println("================================================")
 
-	// Initialize components
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 1. Initialize GPU Scanner
-	fmt.Println("\n[1/5] Initializing GPU Scanner...")
+	fmt.Println("INITIALIZING GPU SCANNER...")
 	scanner, err := gpu.NewScanner(BATCH_SIZE)
 	if err != nil {
-		log.Fatalf("Failed to initialize GPU scanner: %v", err)
+		log.Fatalf("FAILED TO INITIALIZE GPU SCANNER: %v", err)
 	}
 	defer scanner.Close()
 
-	// 2. Initialize Pattern Detector
-	fmt.Println("[2/5] Loading Pattern Definitions...")
+	fmt.Println("LOADING PATTERN DEFINITIONS...")
 	detector := patterns.NewDetector()
 	detector.LoadPatterns()
 
-	// 3. Initialize Solana Ingestor
-	fmt.Println("[3/5] Connecting to Solana RPC...")
-	rpcEndpoint := MAINNET_RPC // Start with mainnet for real data
+	fmt.Println("CONNECTING TO SOLANA RPC...")
+	rpcEndpoint := MAINNET_RPC
 	if endpoint := os.Getenv("SOLANA_RPC"); endpoint != "" {
 		rpcEndpoint = endpoint
 	}
 	
-ing, err := ingestor.NewIngestor(rpcEndpoint)
+	ing, err := ingestor.NewIngestor(rpcEndpoint)
 	if err != nil {
-		log.Fatalf("Failed to initialize Solana ingestor: %v", err)
+		log.Fatalf("FAILED TO INITIALIZE SOLANA INGESTOR: %v", err)
 	}
 	defer ing.Close()
 
-	// 4. Initialize Database
-	fmt.Println("[4/5] Connecting to ClickHouse...")
-	// For production, this should be configurable
+	fmt.Println("CONNECTING TO CLICKHOUSE...")
 	dbClient, err := database.NewClient("127.0.0.1:9000")
+	var startSlot uint64
 	if err != nil {
-		log.Printf("⚠️  Warning: Failed to connect to ClickHouse: %v. Indexing disabled.", err)
+		log.Printf("WARNING: FAILED TO CONNECT TO CLICKHOUSE: %v. INDEXING DISABLED.", err)
 	} else {
 		defer dbClient.Close()
-		log.Println("✅ Connected to ClickHouse")
+		log.Println("CONNECTED TO CLICKHOUSE")
+		
+		lastSlot, err := dbClient.GetLastIndexedSlot()
+		if err == nil && lastSlot > 0 {
+			startSlot = lastSlot + 1
+			fmt.Printf("RESUMING INDEXER FROM SLOT: %d\n", startSlot)
+		}
 	}
 
-	// 5. Start Dashboard Server
-	fmt.Println("[5/5] Starting Dashboard Server...")
+	fmt.Println("STARTING DASHBOARD SERVER...")
 	dashServer := dashboard.NewServer(8080)
 	go dashServer.Start()
 
-	fmt.Println("\n✅ LogStellar is running!")
-	fmt.Println("📊 Dashboard: http://localhost:8080")
-	fmt.Println("🔍 Scanning Solana logs for patterns...")
-	fmt.Println("\nPress Ctrl+C to stop\n")
+	fmt.Println("LOGSTELLAR IS RUNNING")
+	fmt.Println("DASHBOARD: HTTP://LOCALHOST:8080")
+	fmt.Println("SCANNING SOLANA LOGS FOR PATTERNS...")
 
-	// Main processing loop - pass dashboard server for RPC switching
-	go processLogs(ctx, ing, scanner, detector, dashServer, dbClient)
+	logChan := ing.Start(ctx, startSlot, 10)
 
-	// Wait for interrupt signal
+	go func() {
+		var maxSlot uint64
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case logs := <-logChan:
+				if len(logs) == 0 {
+					continue
+				}
+				
+				// Track highest slot in this batch
+				for _, l := range logs {
+					if l.Slot > maxSlot {
+						maxSlot = l.Slot
+					}
+				}
+
+				processBatch(logs, scanner, detector, dashServer, dbClient)
+				
+				if dbClient != nil && maxSlot > 0 {
+					dbClient.UpdateLastIndexedSlot(maxSlot)
+				}
+			}
+		}
+	}()
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 
-	fmt.Println("\n\n🛑 Shutting down LogStellar...")
+	fmt.Println("SHUTTING DOWN LOGSTELLAR...")
 	cancel()
 	time.Sleep(1 * time.Second)
-	fmt.Println("👋 Goodbye!")
-}
-
-func processLogs(ctx context.Context, ing *ingestor.Ingestor, scanner *gpu.Scanner, 
-	detector *patterns.Detector, dash *dashboard.Server, db *database.Client) {
-	
-	logBatch := make([]ingestor.IngestedLog, 0, BATCH_SIZE)
-	ticker := time.NewTicker(3 * time.Second) // Faster polling
-	defer ticker.Stop()
-
-	log.Println("🔄 Starting log ingestion loop...")
-	
-	// Track RPC mode changes
-	lastRPCMode := dash.GetRPCMode()
-	log.Printf("📡 Initial RPC mode: %s", lastRPCMode)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			// Check if RPC mode changed
-			currentRPCMode := dash.GetRPCMode()
-			if currentRPCMode != lastRPCMode {
-				log.Printf("⚡ RPC mode changed: %s -> %s (Note: Restart required for full effect)", lastRPCMode, currentRPCMode)
-				lastRPCMode = currentRPCMode
-			}
-
-			// Fetch recent transactions
-			logs, err := ing.FetchRecentLogs(500) // Increased from 100 to 500
-			if err != nil {
-				log.Printf("❌ Error fetching logs: %v", err)
-				continue
-			}
-
-			if len(logs) == 0 {
-				log.Println("⏳ No logs found in this batch, waiting for next interval...")
-				continue
-			}
-
-			log.Printf("📥 Fetched %d logs from Solana", len(logs))
-			logBatch = append(logBatch, logs...)
-
-			// Process when batch has enough logs OR every 5 batches
-			if len(logBatch) >= 100 { // Lower threshold for testing
-				processBatch(logBatch, scanner, detector, dash, db)
-				logBatch = logBatch[:0] // Clear batch
-			}
-		}
-	}
+	fmt.Println("GOODBYE")
 }
 
 func processBatch(logs []ingestor.IngestedLog, scanner *gpu.Scanner, detector *patterns.Detector, 
@@ -148,25 +120,21 @@ func processBatch(logs []ingestor.IngestedLog, scanner *gpu.Scanner, detector *p
 	
 	startTime := time.Now()
 	
-	// Extract string logs for GPU scanner
 	gpuLogs := make([]string, len(logs))
 	for i, l := range logs {
 		gpuLogs[i] = l.LogMessage
 	}
 
-	// Get patterns to search for
 	patterns := detector.GetPatterns()
 	
-	// Execute GPU scan
 	results, err := scanner.ScanLogs(gpuLogs, patterns)
 	if err != nil {
-		log.Printf("GPU scan error: %v", err)
+		log.Printf("GPU SCAN ERROR: %v", err)
 		return
 	}
 
 	duration := time.Since(startTime)
 	
-	// Batch insert logs to ClickHouse if available
 	if db != nil {
 		dbLogs := make([]database.LogEntry, len(logs))
 		for i, l := range logs {
@@ -175,54 +143,39 @@ func processBatch(logs []ingestor.IngestedLog, scanner *gpu.Scanner, detector *p
 				Slot:       l.Slot,
 				Signature:  l.Signature,
 				LogMessage: l.LogMessage,
+				ProgramID:  l.ProgramID,
 			}
 		}
 		
-		// Run insert in background to not block analysis
 		go func(entries []database.LogEntry) {
 			if err := db.BatchInsertLogs(entries); err != nil {
-				log.Printf("❌ Failed to index logs: %v", err)
+				log.Printf("FAILED TO INDEX LOGS: %v", err)
 			}
 		}(dbLogs)
 	}
 
-	// Process results
 	alertCount := 0
-	var alertsToInsert []database.AlertEntry
-
 	for _, result := range results {
 		if result.Match {
-			alert := fmt.Sprintf("🎯 Pattern detected: %s (confidence: %.2f)", 
+			alert := fmt.Sprintf("PATTERN DETECTED: %s (CONFIDENCE: %.2f)", 
 				result.PatternName, result.Confidence)
 			dash.AddAlert(alert, result)
 			alertCount++
 
 			if db != nil {
-				// Get original log details using index
 				originalLog := logs[result.LogIndex]
-				alertsToInsert = append(alertsToInsert, database.AlertEntry{
-					Timestamp:   time.Now(),
-					PatternName: result.PatternName,
-					Confidence:  float32(result.Confidence),
-					Signature:   originalLog.Signature,
-					RawMatch:    originalLog.LogMessage,
-				})
+				go func(pName string, conf float32, sig string, raw string) {
+					db.BatchInsertAlerts([]database.AlertEntry{{
+						Timestamp:   time.Now(),
+						PatternName: pName,
+						Confidence:  conf,
+						Signature:   sig,
+						RawMatch:    raw,
+					}})
+				}(result.PatternName, float32(result.Confidence), originalLog.Signature, originalLog.LogMessage)
 			}
 		}
 	}
 
-	// Batch insert alerts if available
-	if db != nil && len(alertsToInsert) > 0 {
-		go func(alerts []database.AlertEntry) {
-			if err := db.BatchInsertAlerts(alerts); err != nil {
-				log.Printf("❌ Failed to index alerts: %v", err)
-			}
-		}(alertsToInsert)
-	}
-
-	// Log statistics
-	log.Printf("✨ Processed %d logs in %v (GPU-accelerated) - %d alerts", 
-		len(logs), duration, alertCount)
-	
 	dash.UpdateStats(len(logs), duration, alertCount)
 }
