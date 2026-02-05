@@ -88,7 +88,7 @@ func (c *Client) initSchema() error {
 
 func (c *Client) BatchInsertLogs(logs []LogEntry) error {
 	ctx := context.Background()
-	batch, err := c.conn.PrepareBatch(ctx, "INSERT INTO solana_logs")
+	batch, err := c.conn.PrepareBatch(ctx, "INSERT INTO solana_logs (timestamp, slot, signature, log_message, program_id)")
 	if err != nil {
 		return err
 	}
@@ -107,6 +107,25 @@ func (c *Client) BatchInsertLogs(logs []LogEntry) error {
 	}
 
 	return batch.Send()
+}
+
+func (c *Client) GetRecentLogs(limit int) ([]LogEntry, error) {
+	ctx := context.Background()
+	rows, err := c.conn.Query(ctx, "SELECT timestamp, slot, signature, log_message, program_id FROM solana_logs ORDER BY timestamp DESC LIMIT ?", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var logs []LogEntry
+	for rows.Next() {
+		var l LogEntry
+		if err := rows.Scan(&l.Timestamp, &l.Slot, &l.Signature, &l.LogMessage, &l.ProgramID); err != nil {
+			return nil, err
+		}
+		logs = append(logs, l)
+	}
+	return logs, nil
 }
 
 func (c *Client) BatchInsertAlerts(alerts []AlertEntry) error {
