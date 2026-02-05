@@ -5,20 +5,35 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 )
 
 type Ingestor struct {
-	client    *rpc.Client
-	ctx       context.Context
-	lastSlot  uint64
+	client   *rpc.Client
+	ctx      context.Context
+	lastSlot uint64
 }
+
+type IngestedLog struct {
+	Slot       uint64
+	Signature  string
+	LogMessage string
+	ProgramID  string
+	Timestamp  time.Time
+}
+
+// Regex to extract Program ID from "Program <ID> invoke" logs
+var programInvokeRegex = regexp.MustCompile(`^Program (\w+) invoke`)
 
 func NewIngestor(rpcEndpoint string) (*Ingestor, error) {
 	client := rpc.New(rpcEndpoint)
-	
+
 	return &Ingestor{
 		client:   client,
 		ctx:      context.Background(),
@@ -30,85 +45,174 @@ func (i *Ingestor) Close() {
 	// Cleanup if needed
 }
 
-// FetchRecentLogs fetches recent transaction logs from Solana
-func (i *Ingestor) FetchRecentLogs(limit int) ([]string, error) {
-	// Get recent slot
+// Start begins the parallel ingestion process in the background.
+// It returns a channel that receives batches of logs.
+func (i *Ingestor) Start(ctx context.Context, startSlot uint64, workers int) <-chan []IngestedLog {
+	outCh := make(chan []IngestedLog, workers*2)
+	
+	if startSlot == 0 {
+		// Get current slot if 0
+		current, err := i.client.GetSlot(ctx, rpc.CommitmentFinalized)
+		if err != nil {
+			log.Printf("❌ Failed to get current slot: %v", err)
+			startSlot = 0 
+		} else {
+			startSlot = current
+		}
+	}
+
+	go func() {
+		defer close(outCh)
+
+		// Job queue
+		type job struct {
+			slot uint64
+		}
+		jobs := make(chan job, workers*2)
+
+		// Start workers
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for j := range jobs {
+					logs, err := i.FetchSlotLogs(ctx, j.slot)
+					if err != nil {
+						// Quietly skip or handle rate limits
+						continue
+					}
+					if len(logs) > 0 {
+						outCh <- logs
+					}
+				}
+			}()
+		}
+
+		currentSlot := startSlot
+		ticker := time.NewTicker(400 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				close(jobs)
+				wg.Wait()
+				return
+			case <-ticker.C:
+				tip, err := i.client.GetSlot(ctx, rpc.CommitmentFinalized)
+				if err != nil {
+					continue
+				}
+
+				for s := currentSlot; s <= tip; s++ {
+					select {
+					case jobs <- job{slot: s}:
+						currentSlot++
+					case <-ctx.Done():
+						close(jobs)
+						wg.Wait()
+						return
+					}
+				}
+			}
+		}
+	}()
+
+	return outCh
+}
+
+func (i *Ingestor) FetchSlotLogs(ctx context.Context, slot uint64) ([]IngestedLog, error) {
+	block, err := i.client.GetBlockWithOpts(
+		ctx,
+		slot,
+		&rpc.GetBlockOpts{
+			Commitment:                     rpc.CommitmentFinalized,
+			MaxSupportedTransactionVersion: func() *uint64 { v := uint64(0); return &v }(),
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if block == nil || block.Transactions == nil {
+		return nil, nil
+	}
+
+	blockTime := time.Now()
+	if block.BlockTime != nil {
+		blockTime = time.Unix(int64(*block.BlockTime), 0)
+	}
+
+	logs := make([]IngestedLog, 0, len(block.Transactions)*4)
+
+	for _, tx := range block.Transactions {
+		if tx.Meta == nil || tx.Meta.LogMessages == nil {
+			continue
+		}
+
+		signature := ""
+		parsedTx, err := tx.GetTransaction()
+		if err == nil && len(parsedTx.Signatures) > 0 {
+			signature = parsedTx.Signatures[0].String()
+		}
+
+		activeProgram := "system" 
+
+		for _, logMsg := range tx.Meta.LogMessages {
+			if match := programInvokeRegex.FindStringSubmatch(logMsg); len(match) > 1 {
+				activeProgram = match[1]
+			}
+
+			logs = append(logs, IngestedLog{
+				Slot:       slot,
+				Signature:  signature,
+				LogMessage: logMsg,
+				ProgramID:  activeProgram,
+				Timestamp:  blockTime,
+			})
+		}
+	}
+	return logs, nil
+}
+
+// Deprecated: Use Start() for parallel ingestion
+func (i *Ingestor) FetchRecentLogs(limit int) ([]IngestedLog, error) {
 	slot, err := i.client.GetSlot(i.ctx, rpc.CommitmentFinalized)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get slot: %w", err)
 	}
 
 	if i.lastSlot == 0 {
-		i.lastSlot = slot - 2 // Start from just 2 slots back (faster)
-		log.Printf("🎯 Starting from slot %d (current: %d)", i.lastSlot, slot)
+		i.lastSlot = slot - 2
 	}
 
-	logs := make([]string, 0, limit)
-	blocksChecked := 0
-	txCount := 0
-	
-	// Fetch blocks from lastSlot to current with transaction version support
+	logs := make([]IngestedLog, 0, limit)
 	for s := i.lastSlot; s <= slot && len(logs) < limit; s++ {
-		blocksChecked++
-		block, err := i.client.GetBlockWithOpts(
-			i.ctx,
-			s,
-			&rpc.GetBlockOpts{
-				Commitment:                     rpc.CommitmentFinalized,
-				MaxSupportedTransactionVersion: func() *uint64 { v := uint64(0); return &v }(),
-			},
-		)
+		slotLogs, err := i.FetchSlotLogs(i.ctx, s)
 		if err != nil {
-			// Don't spam logs for missing blocks
 			continue
 		}
-
-		if block == nil || block.Transactions == nil {
-			continue
-		}
-
-		txCount += len(block.Transactions)
-
-		// Extract logs from transactions
-		for _, tx := range block.Transactions {
-			if tx.Meta == nil || tx.Meta.LogMessages == nil {
-				continue
-			}
-
-			// Collect log messages
-			for _, logMsg := range tx.Meta.LogMessages {
-				logs = append(logs, logMsg)
-				if len(logs) >= limit {
-					break
-				}
-			}
+		if len(slotLogs) > 0 {
+			logs = append(logs, slotLogs...)
 		}
 	}
 
-	if blocksChecked > 0 {
-		log.Printf("📊 Checked %d blocks, %d transactions, found %d logs", blocksChecked, txCount, len(logs))
-	} else {
-		log.Printf("⚠️  No blocks checked (slot range: %d to %d)", i.lastSlot, slot)
-	}
-	
 	i.lastSlot = slot + 1
 	return logs, nil
 }
 
-// GetTransactionSignatures fetches recent transaction signatures
 func (i *Ingestor) GetTransactionSignatures(address string, limit int) ([]string, error) {
 	pubkey, err := solana.PublicKeyFromBase58(address)
 	if err != nil {
 		return nil, fmt.Errorf("invalid address: %w", err)
 	}
 
-	// Note: Limit parameter may need to be passed differently depending on SDK version
 	sigs, err := i.client.GetSignaturesForAddress(i.ctx, pubkey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get signatures: %w", err)
 	}
 
-	// Take only 'limit' number of signatures
 	signatures := make([]string, 0, limit)
 	for idx, sig := range sigs {
 		if idx >= limit {
@@ -120,7 +224,6 @@ func (i *Ingestor) GetTransactionSignatures(address string, limit int) ([]string
 	return signatures, nil
 }
 
-// GetTransactionDetails fetches full transaction details
 func (i *Ingestor) GetTransactionDetails(signature string) ([]string, error) {
 	sig, err := solana.SignatureFromBase58(signature)
 	if err != nil {
@@ -146,27 +249,23 @@ func (i *Ingestor) GetTransactionDetails(signature string) ([]string, error) {
 	return tx.Meta.LogMessages, nil
 }
 
-// DecodeInstructionData decodes base64 instruction data
 func DecodeInstructionData(data string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(data)
 }
 
-// GetProgramLogs fetches logs for a specific program ID
 func (i *Ingestor) GetProgramLogs(programID string, limit int) ([]string, error) {
 	pubkey, err := solana.PublicKeyFromBase58(programID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid program ID: %w", err)
 	}
 
-	// Get signatures for the program
 	sigs, err := i.client.GetSignaturesForAddress(i.ctx, pubkey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get signatures: %w", err)
 	}
 
 	logs := make([]string, 0)
-	
-	// Fetch logs for each transaction (up to limit)
+
 	for idx, sig := range sigs {
 		if idx >= limit {
 			break
