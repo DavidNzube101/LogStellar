@@ -5,7 +5,7 @@
 **LOGSTELLAR** is a high-frequency Solana log indexer and observability engine designed for sub-second pattern detection and big-data blockchain analytics.
 
 ## TOOLSTACK
-- **LANGUAGE:** GO (GOLANG)
+- **LANGUAGE:** GO
 - **DATABASE:** CLICKHOUSE (OLAP)
 - **INGESTION:** HYBRID WEBSOCKET + RPC POLLING
 - **UI:** SSE-POWERED REAL-TIME TERMINAL
