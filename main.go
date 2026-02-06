@@ -17,9 +17,10 @@ import (
 )
 
 const (
+	// fallbacks for rpcs, get yours on helius/quicknode(what i use) and set as an env before running the binary
 	MAINNET_RPC = "https://api.mainnet-beta.solana.com"
-	DEVNET_RPC  = "https://api.devnet.solana.com"
-	BATCH_SIZE = 1000
+	DEVNET_RPC  = "https://api.devnet.solana.com" 
+	BATCH_SIZE  = 1000
 )
 
 func main() {
@@ -45,10 +46,16 @@ func main() {
 	if endpoint := os.Getenv("SOLANA_RPC"); endpoint != "" {
 		rpcEndpoint = endpoint
 	}
-	
+
 	ing, err := ingestor.NewIngestor(rpcEndpoint)
 	if err != nil {
 		log.Fatalf("FAILED TO INITIALIZE SOLANA INGESTOR: %v", err)
+	}
+
+	if err := ing.Connect(); err != nil {
+		log.Printf("WEBSOCKET CONNECT FAILED: %v. FALLING BACK TO POLL-ONLY MODE.", err)
+	} else {
+		log.Println("CONNECTED TO SOLANA WEBSOCKET: REAL-TIME STREAM ENABLED")
 	}
 	defer ing.Close()
 
@@ -60,7 +67,7 @@ func main() {
 	} else {
 		defer dbClient.Close()
 		log.Println("CONNECTED TO CLICKHOUSE")
-		
+
 		lastSlot, err := dbClient.GetLastIndexedSlot()
 		if err == nil && lastSlot > 0 {
 			startSlot = lastSlot + 1
@@ -69,14 +76,29 @@ func main() {
 	}
 
 	fmt.Println("STARTING DASHBOARD SERVER...")
-	dashServer := dashboard.NewServer(8080)
+	dashServer := dashboard.NewServer(8080, dbClient, scanner)
 	go dashServer.Start()
 
 	fmt.Println("LOGSTELLAR IS RUNNING")
 	fmt.Println("DASHBOARD: HTTP://LOCALHOST:8080")
 	fmt.Println("SCANNING SOLANA LOGS FOR PATTERNS...")
 
-	logChan := ing.Start(ctx, startSlot, 10)
+	logChan := make(chan []ingestor.IngestedLog, 1000)
+
+	pollChan := ing.Start(ctx, startSlot, 10)
+	go func() {
+		for logs := range pollChan {
+			logChan <- logs
+		}
+	}()
+
+	if ing.HasWS() {
+		go func() {
+			if err := ing.StreamLogs(ctx, logChan); err != nil {
+				log.Printf("STREAM ERROR: %v", err)
+			}
+		}()
+	}
 
 	go func() {
 		var maxSlot uint64
@@ -88,8 +110,7 @@ func main() {
 				if len(logs) == 0 {
 					continue
 				}
-				
-				// Track highest slot in this batch
+
 				for _, l := range logs {
 					if l.Slot > maxSlot {
 						maxSlot = l.Slot
@@ -97,7 +118,7 @@ func main() {
 				}
 
 				processBatch(logs, scanner, detector, dashServer, dbClient)
-				
+
 				if dbClient != nil && maxSlot > 0 {
 					dbClient.UpdateLastIndexedSlot(maxSlot)
 				}
@@ -115,18 +136,18 @@ func main() {
 	fmt.Println("GOODBYE")
 }
 
-func processBatch(logs []ingestor.IngestedLog, scanner *gpu.Scanner, detector *patterns.Detector, 
+func processBatch(logs []ingestor.IngestedLog, scanner *gpu.Scanner, detector *patterns.Detector,
 	dash *dashboard.Server, db *database.Client) {
-	
+
 	startTime := time.Now()
-	
+
 	gpuLogs := make([]string, len(logs))
 	for i, l := range logs {
 		gpuLogs[i] = l.LogMessage
 	}
 
 	patterns := detector.GetPatterns()
-	
+
 	results, err := scanner.ScanLogs(gpuLogs, patterns)
 	if err != nil {
 		log.Printf("GPU SCAN ERROR: %v", err)
@@ -134,30 +155,37 @@ func processBatch(logs []ingestor.IngestedLog, scanner *gpu.Scanner, detector *p
 	}
 
 	duration := time.Since(startTime)
-	
+
 	if db != nil {
 		dbLogs := make([]database.LogEntry, len(logs))
 		for i, l := range logs {
 			dbLogs[i] = database.LogEntry{
-				Timestamp:  l.Timestamp,
-				Slot:       l.Slot,
-				Signature:  l.Signature,
-				LogMessage: l.LogMessage,
-				ProgramID:  l.ProgramID,
+				Timestamp:    l.Timestamp,
+				Slot:         l.Slot,
+				Signature:    l.Signature,
+				LogMessage:   l.LogMessage,
+				ProgramID:    l.ProgramID,
+				Signer:       l.Signer,
+				ComputeUnits: l.ComputeUnits,
+				IsError:      l.IsError,
 			}
 		}
-		
+
 		go func(entries []database.LogEntry) {
 			if err := db.BatchInsertLogs(entries); err != nil {
 				log.Printf("FAILED TO INDEX LOGS: %v", err)
 			}
 		}(dbLogs)
+
+		for _, l := range dbLogs {
+			dash.BroadcastLog(l)
+		}
 	}
 
 	alertCount := 0
 	for _, result := range results {
 		if result.Match {
-			alert := fmt.Sprintf("PATTERN DETECTED: %s (CONFIDENCE: %.2f)", 
+			alert := fmt.Sprintf("PATTERN DETECTED: %s (CONFIDENCE: %.2f)",
 				result.PatternName, result.Confidence)
 			dash.AddAlert(alert, result)
 			alertCount++

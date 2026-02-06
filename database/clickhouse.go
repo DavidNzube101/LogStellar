@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -14,12 +15,13 @@ type Client struct {
 }
 
 func NewClient(addr string) (*Client, error) {
+	password := os.Getenv("CLICKHOUSE_PASSWORD")
 	conn, err := clickhouse.Open(&clickhouse.Options{
 		Addr: []string{addr},
 		Auth: clickhouse.Auth{
 			Database: "default",
 			Username: "default",
-			Password: "",
+			Password: password,
 		},
 		ClientInfo: clickhouse.ClientInfo{
 			Products: []struct {
@@ -55,7 +57,6 @@ func (c *Client) Close() {
 func (c *Client) initSchema() error {
 	ctx := context.Background()
 
-	// Partitioning by month for performance
 	err := c.conn.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS solana_logs_v2 (
 			timestamp DateTime64(3),
@@ -74,7 +75,6 @@ func (c *Client) initSchema() error {
 		return fmt.Errorf("FAILED TO CREATE LOGS TABLE: %w", err)
 	}
 
-	// Materialized View for fast analytics (Program Heatmap)
 	err = c.conn.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS program_stats (
 			timestamp DateTime,
@@ -120,7 +120,6 @@ func (c *Client) initSchema() error {
 		return fmt.Errorf("FAILED TO CREATE ALERTS TABLE: %w", err)
 	}
 
-	// State tracking for the indexer
 	err = c.conn.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS indexer_state (
 			id String,
@@ -190,7 +189,6 @@ func (c *Client) GetLastIndexedSlot() (uint64, error) {
 	var slot uint64
 	err := c.conn.QueryRow(ctx, "SELECT last_slot FROM indexer_state WHERE id = 'main' FINAL").Scan(&slot)
 	if err != nil {
-		// If table is empty, return 0
 		return 0, nil
 	}
 	return slot, nil

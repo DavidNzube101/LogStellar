@@ -14,14 +14,15 @@ import (
 )
 
 type Server struct {
-	port    int
-	alerts  []Alert
-	stats   Stats
-	mu      sync.RWMutex
-	rpcMode string // "devnet" or "mainnet"
-	rpcMu   sync.RWMutex
-	db      *database.Client
-	scanner *gpu.Scanner
+	port         int
+	alerts       []Alert
+	stats        Stats
+	mu           sync.RWMutex
+	rpcMode      string
+	rpcMu        sync.RWMutex
+	db           *database.Client
+	scanner      *gpu.Scanner
+	logBroadcast chan database.LogEntry
 }
 
 type Alert struct {
@@ -40,12 +41,20 @@ type Stats struct {
 
 func NewServer(port int, db *database.Client, scanner *gpu.Scanner) *Server {
 	return &Server{
-		port:    port,
-		alerts:  make([]Alert, 0),
-		stats:   Stats{},
-		rpcMode: "devnet", // Default
-		db:      db,
-		scanner: scanner,
+		port:         port,
+		alerts:       make([]Alert, 0),
+		stats:        Stats{},
+		rpcMode:      "devnet",
+		db:           db,
+		scanner:      scanner,
+		logBroadcast: make(chan database.LogEntry, 100),
+	}
+}
+
+func (s *Server) BroadcastLog(log database.LogEntry) {
+	select {
+	case s.logBroadcast <- log:
+	default:
 	}
 }
 
@@ -57,6 +66,7 @@ func (s *Server) Start() {
 	http.HandleFunc("/api/gpu-stats", s.handleGPUStats)
 	http.HandleFunc("/api/rpc-mode", s.handleRPCMode)
 	http.HandleFunc("/api/switch-rpc", s.handleSwitchRPC)
+	http.HandleFunc("/api/stream", s.handleStream)
 
 	addr := fmt.Sprintf(":%d", s.port)
 	log.Printf("Dashboard server starting on %s", addr)
@@ -250,11 +260,53 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 
         .main-view {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: 350px 1fr 450px;
             flex: 1;
             overflow: hidden;
             gap: 0;
         }
+
+        .live-wire {
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            background: #050505;
+        }
+
+        .live-wire-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+            font-family: 'JetBrains Mono';
+            font-size: 11px;
+            color: var(--accent);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            letter-spacing: 1px;
+        }
+
+        .live-wire-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px;
+            font-family: 'JetBrains Mono';
+            font-size: 10px;
+            color: #444;
+        }
+
+        .log-line {
+            margin-bottom: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: flex;
+            gap: 8px;
+        }
+
+        .log-ts { color: #222; }
+        .log-prog { color: var(--text-dim); }
+        .log-msg { color: #666; }
 
         .alerts-panel {
             border-right: 1px solid var(--border);
@@ -464,6 +516,14 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
     </div>
 
     <main class="main-view">
+        <div class="live-wire">
+            <div class="live-wire-header">
+                <i data-lucide="zap" class="icon-xs"></i>
+                LIVE_WIRE_STREAM
+            </div>
+            <div class="live-wire-content" id="live-wire-content"></div>
+        </div>
+
         <div class="alerts-panel">
             <div class="alerts-list">
                 <div class="search-bar">
@@ -525,7 +585,6 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
             var textColor = isDark ? '#737373' : '#737373';
             var accentColor = isDark ? '#00ff41' : '#2563eb';
 
-            // Line Chart
             var lineCtx = document.getElementById('lineChart').getContext('2d');
             lineChart = new Chart(lineCtx, {
                 type: 'line',
@@ -575,7 +634,6 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
                 }
             });
 
-            // Pie Chart
             var pieCtx = document.getElementById('pieChart').getContext('2d');
             pieChart = new Chart(pieCtx, {
                 type: 'doughnut',
@@ -621,11 +679,9 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
         function updateCharts() {
             if (!lineChart || !pieChart) return;
 
-            // Get current time label
             var now = new Date();
             var timeLabel = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0') + ':' + String(now.getSeconds()).padStart(2, '0');
 
-            // Count patterns in recent alerts (last 100)
             var recentAlerts = allAlerts.slice(0, 100);
             var patternCounts = {};
             var categoryCounts = {};
@@ -634,7 +690,6 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
                 var pattern = alert.Result.PatternName;
                 patternCounts[pattern] = (patternCounts[pattern] || 0) + 1;
 
-                // Determine category
                 var category = 'Other';
                 if (pattern.includes('Token') || pattern.includes('Pump.fun')) category = 'Token';
                 else if (pattern.includes('MEV') || pattern.includes('Whale')) category = 'MEV';
@@ -645,7 +700,6 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
                 categoryCounts[category] = (categoryCounts[category] || 0) + 1;
             });
 
-            // Update line chart
             if (timelineData.labels.length >= maxDataPoints) {
                 timelineData.labels.shift();
                 Object.keys(timelineData.datasets).forEach(function(key) {
@@ -660,8 +714,7 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
                 }
             });
 
-            // Add current counts
-            var topPatterns = Object.keys(patternCounts).slice(0, 5); // Top 5 patterns
+            var topPatterns = Object.keys(patternCounts).slice(0, 5);
             topPatterns.forEach(function(pattern) {
                 if (!timelineData.datasets[pattern]) {
                     timelineData.datasets[pattern] = new Array(timelineData.labels.length - 1).fill(0);
@@ -669,14 +722,12 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
                 timelineData.datasets[pattern].push(patternCounts[pattern]);
             });
 
-            // Pad datasets with zeros
             Object.keys(timelineData.datasets).forEach(function(pattern) {
                 while (timelineData.datasets[pattern].length < timelineData.labels.length) {
                     timelineData.datasets[pattern].unshift(0);
                 }
             });
 
-            // Convert to Chart.js format
             var datasets = [];
             var colors = ['#00ff41', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4'];
             var idx = 0;
@@ -697,7 +748,6 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
             lineChart.data.datasets = datasets;
             lineChart.update('none');
 
-            // Update pie chart
             pieChart.data.labels = Object.keys(categoryCounts);
             pieChart.data.datasets[0].data = Object.values(categoryCounts);
             pieChart.update('none');
@@ -721,10 +771,9 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
                 document.getElementById('rpc-indicator').textContent = 'RPC: ' + mode.toUpperCase();
                 document.getElementById('btn-devnet').classList.toggle('active', mode === 'devnet');
                 document.getElementById('btn-mainnet').classList.toggle('active', mode === 'mainnet');
-                console.log('Switched to ' + mode);
             })
             .catch(function(err) {
-                console.error('Failed to switch RPC:', err);
+                console.error('FAILED TO SWITCH RPC:', err);
             });
         }
 
@@ -815,10 +864,37 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
             document.getElementById('detail-drawer').classList.remove('open');
         }
 
+        function initSSE() {
+            const eventSource = new EventSource('/api/stream');
+            const liveWire = document.getElementById('live-wire-content');
+            
+            eventSource.onmessage = function(event) {
+                const logEntry = JSON.parse(event.data);
+                const line = document.createElement('div');
+                line.className = 'log-line';
+                
+                const ts = new Date(logEntry.Timestamp).toLocaleTimeString();
+                line.innerHTML = '<span class="log-ts">' + ts + '</span> ' +
+                                 '<span class="log-prog">[' + logEntry.ProgramID.slice(0, 8) + '...]</span> ' +
+                                 '<span class="log-msg">' + logEntry.LogMessage + '</span>';
+                
+                liveWire.prepend(line);
+                if (liveWire.childNodes.length > 100) {
+                    liveWire.removeChild(liveWire.lastChild);
+                }
+            };
+
+            eventSource.onerror = function() {
+                eventSource.close();
+                setTimeout(initSSE, 5000);
+            };
+        }
+
         updateDashboard();
         setInterval(updateDashboard, 2000);
         window.onload = function() {
             initCharts();
+            initSSE();
             if (window.lucide) {
                 window.lucide.createIcons();
             }
@@ -876,8 +952,35 @@ func (s *Server) handleSwitchRPC(w http.ResponseWriter, r *http.Request) {
 	s.rpcMode = req.Mode
 	s.rpcMu.Unlock()
 
-	log.Printf("🔄 RPC mode switched to: %s", req.Mode)
+	log.Printf("RPC MODE SWITCHED TO: %s", req.Mode)
 	
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "success", "mode": req.Mode})
+}
+
+func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case logEntry := <-s.logBroadcast:
+			data, err := json.Marshal(logEntry)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		}
+	}
 }

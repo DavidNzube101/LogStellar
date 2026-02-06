@@ -1,83 +1,26 @@
-# LogStellar - GPU-Accelerated Solana Log Analyzer
-
-**The Mission:** A Go-based real-time Solana transaction log analyzer using GPU parallelization to scan millions of logs for specific "Signature Patterns" (detecting new liquidity pools, MEV behavior, token launches, and more).
+# LOGSTELLAR
 
 ![LogStellar Dashboard](public/images/dashboard.png)
 
-Built for the **AIDP GPU Compute Bounty** 
+**LOGSTELLAR** is a high-frequency Solana log indexer and observability engine designed for sub-second pattern detection and big-data blockchain analytics.
 
----
+## TOOLSTACK
+- **LANGUAGE:** GO (GOLANG)
+- **DATABASE:** CLICKHOUSE (OLAP)
+- **INGESTION:** HYBRID WEBSOCKET + RPC POLLING
+- **UI:** SSE-POWERED REAL-TIME TERMINAL
+- **INFRA:** DOCKER + VPS (AMD EPYC)
 
-### Prerequisites
-- Go 1.25.4 or higher
-- Access to Solana RPC (devnet/mainnet)
-- AIDP GPU compute access (apply at https://aidp.store)
+## CORE LOGIC
+1. **INGEST:** CAPTURES RAW TRANSACTION LOGS VIA SOLANA WS/RPC.
+2. **SCAN:** PARALLEL PATTERN MATCHING FOR DEX SWAPS, TOKEN LAUNCHES, AND WHALE MOVEMENTS.
+3. **INDEX:** STORES ENRICHED DATA (SIGNERS, CU, ERRORS) IN CLICKHOUSE.
+4. **STREAM:** PUSHES LIVE SIGNALS TO THE DASHBOARD VIA SERVER-SENT EVENTS.
 
-### Installation
-
+## USAGE
 ```bash
-# 1. Clone/navigate to your project directory
-cd logstellar
+docker run -d --name clickhouse-logstellar -p 9000:9000 clickhouse/clickhouse-server # starting the db
 
-# 2. Install dependencies
-go get github.com/gagliardetto/solana-go
-
-# 3. Build the project
-go build -o logstellar
-
-# 4. Run LogStellar
-./logstellar
+export SOLANA_RPC="your_rpc_url" # from helius/quicknode; ideal 'casue it's not rate-limited like fallbacks
+./logstellar # running the binary
 ```
-
-### Environment Variables (Optional)
-
-```bash
-# Use custom Solana RPC endpoint
-export SOLANA_RPC="https://api.mainnet-beta.solana.com"
-
-# Or use devnet (default)
-export SOLANA_RPC="https://api.devnet.solana.com"
-```
-
----
-
-## Dashboard
-
-Access the web dashboard at: **http://localhost:8080**
-
-Features:
-- Real-time alert feed
-- Processing statistics
-- GPU efficiency metrics
-- Pattern confidence scores
-- Live updating (2-second refresh)
-
----
-
-## GPU Integration (AIDP)
-
-### How LogStellar Uses GPU Compute
-
-Instead of CPU-bound `for` loops, LogStellar:
-
-1. **Batches** 10,000 logs into GPU memory
-2. **Parallelizes** pattern matching across all GPU cores
-3. **Processes** in microseconds vs. seconds on CPU
-
-### AIDP Integration Steps
-
-1. **Request GPU Access**
-   - Visit: https://aidp.store
-   - Fill GPU access request form
-   - Wait for approval
-
-2. **Configure AIDP Endpoint**
-   ```go
-   // In gpu/scanner.go, update to use AIDP compute endpoint
-   scanner.UseAIDPCompute("your-aidp-endpoint")
-   ```
-
-3. **Run Workload**
-   ```bash
-   ./logstellar --gpu-provider=aidp
-   ```

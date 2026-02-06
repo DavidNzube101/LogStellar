@@ -14,12 +14,12 @@ import (
 )
 
 type Ingestor struct {
-	client     *rpc.Client
-	wsClient   *ws.Client
+	client      *rpc.Client
+	wsClient    *ws.Client
 	rpcEndpoint string
 	wsEndpoint  string
-	ctx        context.Context
-	lastSlot   uint64
+	ctx         context.Context
+	lastSlot    uint64
 }
 
 type IngestedLog struct {
@@ -52,7 +52,6 @@ func NewIngestor(rpcEndpoint string) (*Ingestor, error) {
 
 func (i *Ingestor) Connect() error {
 	var err error
-	// Create WebSocket client
 	i.wsClient, err = ws.Connect(context.Background(), i.wsEndpoint)
 	if err != nil {
 		return fmt.Errorf("WS CONNECT ERROR: %w", err)
@@ -90,9 +89,6 @@ func (i *Ingestor) StreamLogs(ctx context.Context, outCh chan<- []IngestedLog) e
 				if !ok {
 					return
 				}
-				if result.Value.Err != nil {
-					// Optionally skip failed txs or keep them
-				}
 
 				logs := make([]IngestedLog, 0, len(result.Value.Logs))
 				sig := result.Value.Signature.String()
@@ -110,7 +106,7 @@ func (i *Ingestor) StreamLogs(ctx context.Context, outCh chan<- []IngestedLog) e
 						LogMessage:   logMsg,
 						ProgramID:    activeProgram,
 						Timestamp:    ts,
-						Signer:       "unknown", // WS doesn't provide this easily
+						Signer:       "unknown",
 						ComputeUnits: 0,
 						IsError:      result.Value.Err != nil,
 					})
@@ -231,7 +227,6 @@ func (i *Ingestor) FetchSlotLogs(ctx context.Context, slot uint64) ([]IngestedLo
 		parsedTx, err := tx.GetTransaction()
 		if err == nil && len(parsedTx.Signatures) > 0 {
 			signature = parsedTx.Signatures[0].String()
-			// The first signature is always the fee payer / signer
 			signer = signature 
 		}
 

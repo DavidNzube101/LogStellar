@@ -4,7 +4,6 @@ import (
 	"logstellar/gpu"
 )
 
-// Detector manages pattern definitions for log analysis
 type Detector struct {
 	patterns []gpu.Pattern
 }
@@ -15,10 +14,8 @@ func NewDetector() *Detector {
 	}
 }
 
-// LoadPatterns initializes all signature patterns
 func (d *Detector) LoadPatterns() {
 	d.patterns = []gpu.Pattern{
-		// Raydium Liquidity Pool Detection
 		{
 			Name: "Raydium LP Creation",
 			Signatures: []string{
@@ -29,8 +26,6 @@ func (d *Detector) LoadPatterns() {
 			Threshold: 0.6,
 			Category:  "DeFi",
 		},
-
-		// Orca Liquidity Pool
 		{
 			Name: "Orca LP Creation",
 			Signatures: []string{
@@ -40,8 +35,6 @@ func (d *Detector) LoadPatterns() {
 			Threshold: 0.5,
 			Category:  "DeFi",
 		},
-
-		// MEV Bot Activity Detection
 		{
 			Name: "MEV Sandwich Attack",
 			Signatures: []string{
@@ -52,8 +45,6 @@ func (d *Detector) LoadPatterns() {
 			Threshold: 0.7,
 			Category:  "MEV",
 		},
-
-		// Jupiter Aggregator Swaps
 		{
 			Name: "Jupiter Aggregator Swap",
 			Signatures: []string{
@@ -63,8 +54,6 @@ func (d *Detector) LoadPatterns() {
 			Threshold: 0.5,
 			Category:  "DeFi",
 		},
-
-		// NFT Marketplace Activity
 		{
 			Name: "Magic Eden NFT Sale",
 			Signatures: []string{
@@ -75,8 +64,6 @@ func (d *Detector) LoadPatterns() {
 			Threshold: 0.6,
 			Category:  "NFT",
 		},
-
-		// Token Launch Detection
 		{
 			Name: "New Token Launch",
 			Signatures: []string{
@@ -86,8 +73,6 @@ func (d *Detector) LoadPatterns() {
 			Threshold: 0.5,
 			Category:  "Token",
 		},
-
-		// Flash Loan Detection
 		{
 			Name: "Flash Loan Execution",
 			Signatures: []string{
@@ -98,10 +83,8 @@ func (d *Detector) LoadPatterns() {
 			Threshold: 0.7,
 			Category:  "DeFi",
 		},
-
-		// Large Transfer Detection
 		{
-			Name: "Whale Transfer",
+			Name: "Large Transfer Detection",
 			Signatures: []string{
 				"Transfer",
 				"amount: 1000000",
@@ -109,8 +92,6 @@ func (d *Detector) LoadPatterns() {
 			Threshold: 0.5,
 			Category:  "Transfer",
 		},
-
-		// Failed Transaction Pattern
 		{
 			Name: "Failed Transaction",
 			Signatures: []string{
@@ -121,8 +102,6 @@ func (d *Detector) LoadPatterns() {
 			Threshold: 0.4,
 			Category:  "Error",
 		},
-
-		// Pump.fun Token Creation
 		{
 			Name: "Pump.fun Launch",
 			Signatures: []string{
@@ -132,20 +111,35 @@ func (d *Detector) LoadPatterns() {
 			Threshold: 0.5,
 			Category:  "Meme",
 		},
+		{
+			Name: "Raydium V4 Swap",
+			Signatures: []string{
+				"675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+				"swap",
+			},
+			Threshold: 0.6,
+			Category:  "DeFi",
+		},
+		{
+			Name: "Orca Whirlpool Swap",
+			Signatures: []string{
+				"whirLbMiqauG3qyUmg2S64P2f24WoYM6vnyUshKDqqV",
+				"swap",
+			},
+			Threshold: 0.6,
+			Category:  "DeFi",
+		},
 	}
 }
 
-// GetPatterns returns all loaded patterns
 func (d *Detector) GetPatterns() []gpu.Pattern {
 	return d.patterns
 }
 
-// AddCustomPattern allows adding user-defined patterns
 func (d *Detector) AddCustomPattern(pattern gpu.Pattern) {
 	d.patterns = append(d.patterns, pattern)
 }
 
-// GetPatternsByCategory filters patterns by category
 func (d *Detector) GetPatternsByCategory(category string) []gpu.Pattern {
 	filtered := make([]gpu.Pattern, 0)
 	for _, p := range d.patterns {
@@ -156,7 +150,6 @@ func (d *Detector) GetPatternsByCategory(category string) []gpu.Pattern {
 	return filtered
 }
 
-// RemovePattern removes a pattern by name
 func (d *Detector) RemovePattern(name string) {
 	newPatterns := make([]gpu.Pattern, 0)
 	for _, p := range d.patterns {
