@@ -2,6 +2,8 @@ package patterns
 
 import (
 	"logstellar/gpu"
+
+	"github.com/gagliardetto/solana-go"
 )
 
 type Detector struct {
@@ -12,6 +14,26 @@ func NewDetector() *Detector {
 	return &Detector{
 		patterns: make([]gpu.Pattern, 0),
 	}
+}
+
+func (d *Detector) GetFilterPrograms() []solana.PublicKey {
+	programMap := make(map[string]bool)
+	var programs []solana.PublicKey
+
+	for _, p := range d.patterns {
+		for _, sig := range p.Signatures {
+			if len(sig) >= 32 && len(sig) <= 44 {
+				pk, err := solana.PublicKeyFromBase58(sig)
+				if err == nil {
+					if !programMap[pk.String()] {
+						programMap[pk.String()] = true
+						programs = append(programs, pk)
+					}
+				}
+			}
+		}
+	}
+	return programs
 }
 
 func (d *Detector) LoadPatterns() {
