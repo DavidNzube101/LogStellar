@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/gagliardetto/solana-go/rpc/ws"
 )
@@ -69,9 +70,14 @@ func (i *Ingestor) Close() {
 	}
 }
 
-func (i *Ingestor) StreamLogs(ctx context.Context, outCh chan<- []IngestedLog) error {
+func (i *Ingestor) StreamLogs(ctx context.Context, outCh chan<- []IngestedLog, programs []solana.PublicKey) error {
+	var filter ws.LogsSubscribeFilter = ws.LogsSubscribeFilterAll
+	if len(programs) > 0 {
+		filter = ws.LogsSubscribeFilterMentions(programs)
+	}
+
 	sub, err := i.wsClient.LogsSubscribe(
-		ws.LogsSubscribeFilterAll,
+		filter,
 		rpc.CommitmentProcessed,
 	)
 	if err != nil {
