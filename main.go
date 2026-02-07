@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	// fallbacks for rpcs, get yours on helius/quicknode(what i use) and set as an env before running the binary
+	// fallbacks for rpcs, get yours on helius/quicknode(what i use) and set as an env before running the binary  
 	MAINNET_RPC = "https://api.mainnet-beta.solana.com"
 	DEVNET_RPC  = "https://api.devnet.solana.com" 
 	BATCH_SIZE  = 1000
@@ -94,7 +94,8 @@ func main() {
 
 	if ing.HasWS() {
 		go func() {
-			if err := ing.StreamLogs(ctx, logChan); err != nil {
+			filterPrograms := detector.GetFilterPrograms()
+			if err := ing.StreamLogs(ctx, logChan, filterPrograms); err != nil {
 				log.Printf("STREAM ERROR: %v", err)
 			}
 		}()
