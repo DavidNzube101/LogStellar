@@ -71,19 +71,24 @@ func (i *Ingestor) Close() {
 }
 
 func (i *Ingestor) StreamLogs(ctx context.Context, outCh chan<- []IngestedLog, programs []solana.PublicKey) error {
-	var filter ws.LogsSubscribeFilter = ws.LogsSubscribeFilterAll
 	if len(programs) > 0 {
-		filter = ws.LogsSubscribeFilterMentions(programs)
+		sub, err := i.wsClient.LogsSubscribeMentions(programs[0], rpc.CommitmentProcessed)
+		if err != nil {
+			return fmt.Errorf("WS SUBSCRIBE ERROR: %w", err)
+		}
+		i.handleSubscription(ctx, sub, outCh)
+		return nil
 	}
 
-	sub, err := i.wsClient.LogsSubscribe(
-		filter,
-		rpc.CommitmentProcessed,
-	)
+	sub, err := i.wsClient.LogsSubscribe(ws.LogsSubscribeFilterAll, rpc.CommitmentProcessed)
 	if err != nil {
 		return fmt.Errorf("WS SUBSCRIBE ERROR: %w", err)
 	}
+	i.handleSubscription(ctx, sub, outCh)
+	return nil
+}
 
+func (i *Ingestor) handleSubscription(ctx context.Context, sub *ws.LogSubscription, outCh chan<- []IngestedLog) {
 	go func() {
 		defer sub.Unsubscribe()
 		
@@ -124,8 +129,6 @@ func (i *Ingestor) StreamLogs(ctx context.Context, outCh chan<- []IngestedLog, p
 			}
 		}
 	}()
-
-	return nil
 }
 
 func (i *Ingestor) Start(ctx context.Context, startSlot uint64, workers int) <-chan []IngestedLog {
