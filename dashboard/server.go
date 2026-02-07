@@ -22,7 +22,8 @@ type Server struct {
 	rpcMu        sync.RWMutex
 	db           *database.Client
 	scanner      *gpu.Scanner
-	logBroadcast chan database.LogEntry
+	clients      map[chan database.LogEntry]bool
+	clientsMu    sync.RWMutex
 }
 
 type Alert struct {
@@ -47,14 +48,18 @@ func NewServer(port int, db *database.Client, scanner *gpu.Scanner) *Server {
 		rpcMode:      "devnet",
 		db:           db,
 		scanner:      scanner,
-		logBroadcast: make(chan database.LogEntry, 100),
+		clients:      make(map[chan database.LogEntry]bool),
 	}
 }
 
-func (s *Server) BroadcastLog(log database.LogEntry) {
-	select {
-	case s.logBroadcast <- log:
-	default:
+func (s *Server) BroadcastLog(logEntry database.LogEntry) {
+	s.clientsMu.RLock()
+	defer s.clientsMu.RUnlock()
+	for clientCh := range s.clients {
+		select {
+		case clientCh <- logEntry:
+		default:
+		}
 	}
 }
 
@@ -959,28 +964,77 @@ func (s *Server) handleSwitchRPC(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
+
 	w.Header().Set("Content-Type", "text/event-stream")
+
 	w.Header().Set("Cache-Control", "no-cache")
+
 	w.Header().Set("Connection", "keep-alive")
+
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
+
+
 	flusher, ok := w.(http.Flusher)
+
 	if !ok {
+
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+
 		return
+
 	}
 
+
+
+	clientCh := make(chan database.LogEntry, 100)
+
+	s.clientsMu.Lock()
+
+	s.clients[clientCh] = true
+
+	s.clientsMu.Unlock()
+
+
+
+	defer func() {
+
+		s.clientsMu.Lock()
+
+		delete(s.clients, clientCh)
+
+		s.clientsMu.Unlock()
+
+		close(clientCh)
+
+	}()
+
+
+
 	for {
+
 		select {
+
 		case <-r.Context().Done():
+
 			return
-		case logEntry := <-s.logBroadcast:
+
+		case logEntry := <-clientCh:
+
 			data, err := json.Marshal(logEntry)
+
 			if err != nil {
+
 				continue
+
 			}
+
 			fmt.Fprintf(w, "data: %s\n\n", data)
+
 			flusher.Flush()
+
 		}
+
 	}
+
 }
