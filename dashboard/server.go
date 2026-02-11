@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"logstellar/database"
-	"logstellar/gpu"
+	"github.com/DavidNzube101/LogStellar/database"
+	"github.com/DavidNzube101/LogStellar/gpu"
 )
 
 type Server struct {

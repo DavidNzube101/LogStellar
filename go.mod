@@ -1,4 +1,4 @@
-module logstellar
+module github.com/DavidNzube101/LogStellar
 
 go 1.25.4
 

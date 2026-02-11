@@ -1,7 +1,7 @@
 package patterns
 
 import (
-	"logstellar/gpu"
+	"github.com/DavidNzube101/LogStellar/gpu"
 
 	"github.com/gagliardetto/solana-go"
 )

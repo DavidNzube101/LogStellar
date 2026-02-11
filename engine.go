@@ -6,11 +6,11 @@ import (
 	"log"
 	"time"
 
-	"logstellar/dashboard"
-	"logstellar/database"
-	"logstellar/gpu"
-	"logstellar/ingestor"
-	"logstellar/patterns"
+	"github.com/DavidNzube101/LogStellar/dashboard"
+	"github.com/DavidNzube101/LogStellar/database"
+	"github.com/DavidNzube101/LogStellar/gpu"
+	"github.com/DavidNzube101/LogStellar/ingestor"
+	"github.com/DavidNzube101/LogStellar/patterns"
 )
 
 type Signal struct {
